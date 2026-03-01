@@ -280,10 +280,10 @@ def home():
             </style>
 
             <div class="container">
-                <h1>Excel Autolijst</h1>
+                <h1>Autolijst</h1>
                 <p class="version">Versie: {{ app_version }}</p>
-                <p>Bestand <strong>auto_lijst.xlsx</strong> is niet gevonden of bevat geen kolommen.</p>
-                <p>Plaats een Excel-bestand met kolommen in dezelfde map als <strong>app.py</strong>.</p>
+                <p>Er is nog geen data gevonden.</p>
+                <p>Plaats eventueel <strong>auto_lijst.xlsx</strong> in dezelfde map als <strong>app.py</strong> voor een eenmalige migratie.</p>
             </div>
             """,
             app_version=app_version,
@@ -373,6 +373,8 @@ def home():
                 border-radius: 10px;
                 padding: 16px;
                 margin-bottom: 10px;
+                max-width: 560px;
+                margin-left: auto;
             }
             .add-title {
                 margin: 0 0 6px;
@@ -386,8 +388,16 @@ def home():
             }
             .add-grid {
                 display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                grid-template-columns: repeat(2, minmax(220px, 1fr));
                 gap: 10px 14px;
+            }
+            @media (max-width: 700px) {
+                .add-grid {
+                    grid-template-columns: 1fr;
+                }
+                .add-section {
+                    max-width: 100%;
+                }
             }
             label {
                 display: block;
@@ -452,13 +462,12 @@ def home():
         </style>
 
         <div class="container">
-            <h1>Excel Autolijst</h1>
+            <h1>Autolijst</h1>
             <div class="version">Versie: {{ app_version }}</div>
 
-            <h2>Nieuwe rij toevoegen</h2>
             <div class="add-section">
                 <h3 class="add-title">Nieuwe auto invoeren</h3>
-                <p class="add-help">Vul de velden in en klik op Toevoegen om direct een nieuwe rij in Excel op te slaan.</p>
+                <p class="add-help">Vul de velden in en klik op Toevoegen om direct een nieuwe rij op te slaan.</p>
                 <form method="post" action="{{ url_for('add_row') }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <input type="hidden" name="per_page" value="{{ per_page }}">

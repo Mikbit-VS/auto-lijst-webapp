@@ -1,4 +1,4 @@
-# Excel Autolijst
+# Autolijst
 
 Kleine Flask-app om auto’s te beheren via de browser.
 
@@ -97,3 +97,58 @@ Daarnaast:
 - Migratie vanaf Excel lukt niet:
   - Controleer of `auto_lijst.xlsx` in dezelfde map staat als `app.py`.
   - Controleer of het bestand leesbaar is.
+
+## Beheer-checklist (live)
+
+### Dagelijks (30 sec)
+
+1. Open de app en test één actie (bijv. toevoegen of bewerken).
+2. Controleer live versie:
+
+```text
+https://auto-lijst-webapp.onrender.com/version
+```
+
+### Bij elke codewijziging
+
+```powershell
+git status
+git add .
+git commit -m "Korte, duidelijke wijziging"
+git push
+```
+
+Controleer daarna in Render of de nieuwste deploy status **Live** is.
+
+### Backup & herstel
+
+- Maak periodiek een backup van `auto_lijst.db`.
+- Zet Render alerts aan voor mislukte deploys.
+- Gebruik bij problemen een rollback naar de vorige succesvolle deploy.
+
+## Incident-procedure
+
+### 1) Site geeft `500 Internal Server Error`
+
+1. Open Render → service → **Logs**.
+2. Zoek de eerste traceback/foutregel.
+3. Vergelijk live versie via `/version` met je laatste commit.
+4. Als nodig: rollback naar vorige succesvolle deploy.
+
+### 2) Site laadt, maar data lijkt leeg
+
+1. Controleer of de juiste opslag gebruikt wordt (`auto_lijst.db`).
+2. Controleer of een recente deploy niet op een lege runtime-schijf is gestart.
+3. Herstel data vanuit je laatste backup.
+
+### 3) Nieuwe push is niet live
+
+1. Controleer op GitHub of de commit op `main` staat.
+2. Controleer in Render of die commit gedeployed is.
+3. Start handmatig: **Manual Deploy → Deploy latest commit**.
+
+### 4) Snelle basischeck na herstel
+
+1. Open homepage.
+2. Test 1x toevoegen en 1x bewerken.
+3. Controleer `/version`.
