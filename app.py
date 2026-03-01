@@ -2,8 +2,9 @@ from pathlib import Path
 import os
 import re
 import sqlite3
+import subprocess
 
-from flask import Flask, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 import pandas as pd
 
 app = Flask(__name__)
@@ -11,6 +12,18 @@ excel_path = Path(__file__).with_name("auto_lijst.xlsx")
 db_path = Path(__file__).with_name("auto_lijst.db")
 table_name = "autos"
 default_columns = ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"]
+
+
+def get_app_version() -> str:
+    env_version = os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT")
+    if env_version:
+        return env_version[:7]
+
+    try:
+        output = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL)
+        return output.decode("utf-8").strip()
+    except Exception:
+        return "unknown"
 
 
 def ensure_category_column(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
@@ -237,6 +250,7 @@ def parse_positive_int(value: str | None, default: int) -> int:
 @app.route("/")
 def home():
     df = load_dataframe()
+    app_version = get_app_version()
 
     if df.empty and len(df.columns) == 0:
         return render_template_string(
@@ -259,14 +273,20 @@ def home():
                 h1 {
                     margin-top: 0;
                 }
+                .version {
+                    color: #6b7280;
+                    font-size: 0.85rem;
+                }
             </style>
 
             <div class="container">
                 <h1>Excel Autolijst</h1>
+                <p class="version">Versie: {{ app_version }}</p>
                 <p>Bestand <strong>auto_lijst.xlsx</strong> is niet gevonden of bevat geen kolommen.</p>
                 <p>Plaats een Excel-bestand met kolommen in dezelfde map als <strong>app.py</strong>.</p>
             </div>
-            """
+            """,
+            app_version=app_version,
         )
 
     df, _ = ensure_category_column(df)
@@ -316,6 +336,12 @@ def home():
             h1 {
                 margin-top: 0;
                 margin-bottom: 18px;
+            }
+            .version {
+                color: #6b7280;
+                font-size: 0.85rem;
+                margin-top: -8px;
+                margin-bottom: 14px;
             }
             h2 {
                 margin-top: 26px;
@@ -427,6 +453,7 @@ def home():
 
         <div class="container">
             <h1>Excel Autolijst</h1>
+            <div class="version">Versie: {{ app_version }}</div>
 
             <h2>Nieuwe rij toevoegen</h2>
             <div class="add-section">
@@ -512,7 +539,13 @@ def home():
         page=page,
         per_page=per_page,
         total_pages=total_pages,
+        app_version=app_version,
     )
+
+
+@app.route("/version")
+def version():
+    return jsonify({"version": get_app_version()})
 
 
 @app.route("/add", methods=["POST"])
