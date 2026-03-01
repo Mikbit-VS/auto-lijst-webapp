@@ -10,6 +10,7 @@ import pandas as pd
 app = Flask(__name__)
 excel_path = Path(__file__).with_name("auto_lijst.xlsx")
 db_path = Path(__file__).with_name("auto_lijst.db")
+static_path = Path(__file__).with_name("static")
 table_name = "autos"
 default_columns = ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"]
 
@@ -24,6 +25,18 @@ def get_app_version() -> str:
         return output.decode("utf-8").strip()
     except Exception:
         return "unknown"
+
+
+def get_header_image_url() -> str | None:
+    candidates = [
+        "porsche911cabrio.jpg",
+    ]
+
+    for filename in candidates:
+        if (static_path / filename).exists():
+            return url_for("static", filename=filename)
+
+    return None
 
 
 def ensure_category_column(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
@@ -251,6 +264,7 @@ def parse_positive_int(value: str | None, default: int) -> int:
 def home():
     df = load_dataframe()
     app_version = get_app_version()
+    header_image_url = get_header_image_url()
 
     if df.empty and len(df.columns) == 0:
         return render_template_string(
@@ -277,16 +291,37 @@ def home():
                     color: #6b7280;
                     font-size: 0.85rem;
                 }
+                .page-head {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 14px;
+                }
+                .brand-image {
+                    width: 220px;
+                    max-width: 38vw;
+                    height: auto;
+                    border-radius: 10px;
+                    object-fit: cover;
+                    border: 1px solid #e5e7eb;
+                }
             </style>
 
             <div class="container">
-                <h1>Autolijst</h1>
-                <p class="version">Versie: {{ app_version }}</p>
+                <div class="page-head">
+                    {% if header_image_url %}
+                        <img src="{{ header_image_url }}" alt="Auto" class="brand-image">
+                    {% endif %}
+                    <div>
+                        <h1>Autolijst</h1>
+                        <p class="version">Versie: {{ app_version }}</p>
+                    </div>
+                </div>
                 <p>Er is nog geen data gevonden.</p>
                 <p>Plaats eventueel <strong>auto_lijst.xlsx</strong> in dezelfde map als <strong>app.py</strong> voor een eenmalige migratie.</p>
             </div>
             """,
             app_version=app_version,
+            header_image_url=header_image_url,
         )
 
     df, _ = ensure_category_column(df)
@@ -342,6 +377,28 @@ def home():
                 font-size: 0.85rem;
                 margin-top: -8px;
                 margin-bottom: 14px;
+            }
+            .page-head {
+                display: flex;
+                align-items: flex-start;
+                gap: 14px;
+            }
+            .brand-image {
+                width: 220px;
+                max-width: 30vw;
+                height: auto;
+                border-radius: 10px;
+                object-fit: cover;
+                border: 1px solid #e5e7eb;
+            }
+            @media (max-width: 900px) {
+                .page-head {
+                    flex-direction: column;
+                }
+                .brand-image {
+                    width: 100%;
+                    max-width: 360px;
+                }
             }
             h2 {
                 margin-top: 26px;
@@ -462,8 +519,15 @@ def home():
         </style>
 
         <div class="container">
-            <h1>Autolijst</h1>
-            <div class="version">Versie: {{ app_version }}</div>
+            <div class="page-head">
+                {% if header_image_url %}
+                    <img src="{{ header_image_url }}" alt="Auto" class="brand-image">
+                {% endif %}
+                <div>
+                    <h1>Autolijst</h1>
+                    <div class="version">Versie: {{ app_version }}</div>
+                </div>
+            </div>
 
             <div class="add-section">
                 <h3 class="add-title">Nieuwe auto invoeren</h3>
@@ -549,6 +613,7 @@ def home():
         per_page=per_page,
         total_pages=total_pages,
         app_version=app_version,
+        header_image_url=header_image_url,
     )
 
 
