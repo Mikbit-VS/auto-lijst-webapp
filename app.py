@@ -186,7 +186,7 @@ def load_dataframe() -> pd.DataFrame:
         if not table_exists(connection, table_name):
             return pd.DataFrame(columns=default_columns)
 
-        query = f'SELECT "Merk", "Type", "Bouwjaar", "Prijs", "Categorie" FROM "{table_name}" ORDER BY id'
+        query = f'SELECT id, "Merk", "Type", "Bouwjaar", "Prijs", "Categorie" FROM "{table_name}" ORDER BY id'
         df = pd.read_sql_query(query, connection)
 
     return df
@@ -196,11 +196,14 @@ def save_dataframe(df: pd.DataFrame) -> None:
     df, _ = ensure_category_column(df)
     df, _ = apply_category_rules(df)
 
+    if "id" not in df.columns:
+        df["id"] = pd.NA
+
     for column in default_columns:
         if column not in df.columns:
             df[column] = ""
 
-    df = df[default_columns].copy()
+    df = df[["id", *default_columns]].copy()
     df = df.fillna("")
     for column in default_columns:
         df[column] = df[column].astype(str)
@@ -219,8 +222,18 @@ def save_dataframe(df: pd.DataFrame) -> None:
             '''
         )
         connection.execute(f'DELETE FROM "{table_name}"')
-        insert_sql = f'INSERT INTO "{table_name}" ("Merk", "Type", "Bouwjaar", "Prijs", "Categorie") VALUES (?, ?, ?, ?, ?)'
-        connection.executemany(insert_sql, df[default_columns].itertuples(index=False, name=None))
+
+        insert_with_id_sql = f'INSERT INTO "{table_name}" (id, "Merk", "Type", "Bouwjaar", "Prijs", "Categorie") VALUES (?, ?, ?, ?, ?, ?)'
+        insert_without_id_sql = f'INSERT INTO "{table_name}" ("Merk", "Type", "Bouwjaar", "Prijs", "Categorie") VALUES (?, ?, ?, ?, ?)'
+
+        for _, row in df.iterrows():
+            parsed_id = parse_row_id(row.get("id"))
+            values = tuple(row[column] for column in default_columns)
+            if parsed_id is not None:
+                connection.execute(insert_with_id_sql, (parsed_id, *values))
+            else:
+                connection.execute(insert_without_id_sql, values)
+
         connection.commit()
 
 
@@ -323,6 +336,61 @@ def get_filter_values_from_request(values) -> dict[str, str]:
 
 def get_non_empty_filter_params(filter_values: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in filter_values.items() if value != ""}
+
+
+def get_sort_values_from_request(values) -> tuple[str, str]:
+    allowed_sort_fields = {"id", "Merk", "Type", "Bouwjaar", "Prijs", "Categorie"}
+    sort_by = str(values.get("sort_by", "id")).strip()
+    sort_dir = str(values.get("sort_dir", "asc")).strip().lower()
+
+    if sort_by not in allowed_sort_fields:
+        sort_by = "id"
+    if sort_dir not in {"asc", "desc"}:
+        sort_dir = "asc"
+
+    return sort_by, sort_dir
+
+
+def apply_sorting(df: pd.DataFrame, sort_by: str, sort_dir: str) -> pd.DataFrame:
+    if df.empty or sort_by not in df.columns:
+        return df
+
+    ascending = sort_dir == "asc"
+    sorted_df = df.copy()
+
+    if sort_by == "Bouwjaar":
+        key_series = sorted_df["Bouwjaar"].apply(parse_bouwjaar)
+        fill_value = float("inf") if ascending else float("-inf")
+        sorted_df["_sort_key"] = key_series.fillna(fill_value)
+    elif sort_by == "Prijs":
+        key_series = sorted_df["Prijs"].apply(parse_price_number)
+        fill_value = float("inf") if ascending else float("-inf")
+        sorted_df["_sort_key"] = key_series.fillna(fill_value)
+    elif sort_by == "id":
+        key_series = sorted_df["id"].apply(parse_row_id)
+        fill_value = float("inf") if ascending else float("-inf")
+        sorted_df["_sort_key"] = key_series.fillna(fill_value)
+    else:
+        sorted_df["_sort_key"] = sorted_df[sort_by].astype(str).str.strip().str.lower()
+
+    sorted_df = sorted_df.sort_values("_sort_key", ascending=ascending, kind="mergesort")
+    return sorted_df.drop(columns=["_sort_key"])
+
+
+def parse_row_id(value) -> int | None:
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        parsed = int(float(text))
+    except ValueError:
+        return None
+
+    return parsed if parsed > 0 else None
 
 
 def build_filtered_dataframe(df: pd.DataFrame, filter_values: dict[str, str]) -> pd.DataFrame:
@@ -434,11 +502,13 @@ def home():
 
     df, _ = ensure_category_column(df)
     df, _ = apply_category_rules(df)
-    columns = list(df.columns)
+    columns = [column for column in df.columns if column != "id"]
     editable_columns = [column for column in columns if column != "Categorie"]
 
     filter_values = get_filter_values_from_request(request.args)
     filtered_df = build_filtered_dataframe(df, filter_values)
+    sort_by, sort_dir = get_sort_values_from_request(request.args)
+    filtered_df = apply_sorting(filtered_df, sort_by, sort_dir)
 
     total_rows = len(filtered_df)
     page = parse_positive_int(request.args.get("page"), 1)
@@ -453,6 +523,7 @@ def home():
 
     records = []
     for row_index in range(start, end):
+        stable_id = parse_row_id(filtered_df.iloc[row_index].get("id"))
         row_data = {
             column: to_display_value(
                 filtered_df.iloc[row_index][column],
@@ -462,14 +533,43 @@ def home():
             for column in columns
         }
         original_index = int(filtered_df.index[row_index])
-        records.append({"index": original_index, "display_index": row_index + 1 + start, "data": row_data})
+        records.append(
+            {
+                "index": original_index,
+                "display_id": stable_id if stable_id is not None else row_index + 1 + start,
+                "data": row_data,
+            }
+        )
 
     non_empty_filter_params = get_non_empty_filter_params(filter_values)
-    base_query_params = {"per_page": per_page, **non_empty_filter_params}
+    base_query_params = {
+        "per_page": per_page,
+        "sort_by": sort_by,
+        "sort_dir": sort_dir,
+        **non_empty_filter_params,
+    }
     prev_page_url = url_for("home", page=page - 1, **base_query_params) if page > 1 else None
     next_page_url = url_for("home", page=page + 1, **base_query_params) if page < total_pages else None
-    pdf_export_url = url_for("export_pdf", **non_empty_filter_params)
-    excel_export_url = url_for("export_excel", **non_empty_filter_params)
+    pdf_export_url = url_for("export_pdf", sort_by=sort_by, sort_dir=sort_dir, **non_empty_filter_params)
+    excel_export_url = url_for("export_excel", sort_by=sort_by, sort_dir=sort_dir, **non_empty_filter_params)
+
+    sort_targets = ["id", *columns]
+    sort_urls: dict[str, str] = {}
+    sort_labels: dict[str, str] = {}
+    for target in sort_targets:
+        next_dir = "desc" if sort_by == target and sort_dir == "asc" else "asc"
+        arrow = ""
+        if sort_by == target:
+            arrow = " ↑" if sort_dir == "asc" else " ↓"
+        sort_labels[target] = f"{target}{arrow}"
+        sort_urls[target] = url_for(
+            "home",
+            page=1,
+            per_page=per_page,
+            sort_by=target,
+            sort_dir=next_dir,
+            **non_empty_filter_params,
+        )
 
     return render_template_string(
         """
@@ -557,6 +657,14 @@ def home():
             .data-table th {
                 background: #f3f4f6;
                 color: #111827;
+            }
+            .sort-link {
+                color: inherit;
+                text-decoration: none;
+                display: inline-block;
+            }
+            .sort-link:hover {
+                text-decoration: underline;
             }
             .field {
                 margin-bottom: 10px;
@@ -786,6 +894,8 @@ def home():
                     <form method="post" action="{{ url_for('add_row') }}">
                         <input type="hidden" name="page" value="{{ page }}">
                         <input type="hidden" name="per_page" value="{{ per_page }}">
+                        <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                        <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                         {% for key, value in filter_values.items() %}
                             <input type="hidden" name="{{ key }}" value="{{ value }}">
                         {% endfor %}
@@ -807,6 +917,8 @@ def home():
                 <form method="get" action="{{ url_for('home') }}">
                     <input type="hidden" name="page" value="1">
                     <input type="hidden" name="per_page" value="{{ per_page }}">
+                    <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                    <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                     <div class="filter-grid">
                         <div class="field">
                             <label for="filter_merk">Merk bevat</label>
@@ -844,7 +956,7 @@ def home():
                     <div class="filter-actions">
                         <div class="filter-main-actions">
                             <button type="submit">Filter</button>
-                            <a href="{{ url_for('home', per_page=per_page) }}" class="small-btn reset-btn">Reset</a>
+                            <a href="{{ url_for('home', per_page=per_page, sort_by=sort_by, sort_dir=sort_dir) }}" class="small-btn reset-btn">Reset</a>
                         </div>
                         <div class="filter-export-actions">
                             <a href="{{ pdf_export_url }}" class="small-btn pdf-btn">PDF van selectie</a>
@@ -865,6 +977,8 @@ def home():
                         <div class="per-page-controls">
                             <input id="per_page" type="text" name="per_page" value="{{ per_page }}" class="per-page-input">
                             <input type="hidden" name="page" value="1">
+                            <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                            <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                             {% for key, value in filter_values.items() %}
                                 <input type="hidden" name="{{ key }}" value="{{ value }}">
                             {% endfor %}
@@ -877,9 +991,9 @@ def home():
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>#</th>
+                        <th><a href="{{ sort_urls['id'] }}" class="sort-link">{{ sort_labels['id'] }}</a></th>
                         {% for column in columns %}
-                            <th>{{ column }}</th>
+                            <th><a href="{{ sort_urls[column] }}" class="sort-link">{{ sort_labels[column] }}</a></th>
                         {% endfor %}
                         <th>Acties</th>
                     </tr>
@@ -888,15 +1002,17 @@ def home():
                     {% if records %}
                         {% for record in records %}
                             <tr>
-                                <td>{{ record.display_index }}</td>
+                                <td>{{ record.display_id }}</td>
                                 {% for column in columns %}
                                     <td>{{ record.data[column] }}</td>
                                 {% endfor %}
                                 <td>
-                                    <a href="{{ url_for('edit_row', row_index=record.index, page=page, per_page=per_page, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="small-btn">Bewerk</a>
+                                    <a href="{{ url_for('edit_row', row_index=record.index, page=page, per_page=per_page, sort_by=sort_by, sort_dir=sort_dir, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="small-btn">Bewerk</a>
                                     <form method="post" action="{{ url_for('delete_row', row_index=record.index) }}" class="inline-form">
                                         <input type="hidden" name="page" value="{{ page }}">
                                         <input type="hidden" name="per_page" value="{{ per_page }}">
+                                        <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                                        <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                                         {% for key, value in filter_values.items() %}
                                             <input type="hidden" name="{{ key }}" value="{{ value }}">
                                         {% endfor %}
@@ -934,6 +1050,10 @@ def home():
         app_version=app_version,
         header_image_url=header_image_url,
         filter_values=filter_values,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        sort_urls=sort_urls,
+        sort_labels=sort_labels,
         prev_page_url=prev_page_url,
         next_page_url=next_page_url,
         pdf_export_url=pdf_export_url,
@@ -954,6 +1074,8 @@ def export_pdf():
 
     filter_values = get_filter_values_from_request(request.args)
     filtered_df = build_filtered_dataframe(df, filter_values)
+    sort_by, sort_dir = get_sort_values_from_request(request.args)
+    filtered_df = apply_sorting(filtered_df, sort_by, sort_dir)
     columns = list(df.columns)
 
     try:
@@ -1092,6 +1214,8 @@ def export_excel():
 
     filter_values = get_filter_values_from_request(request.args)
     filtered_df = build_filtered_dataframe(df, filter_values)
+    sort_by, sort_dir = get_sort_values_from_request(request.args)
+    filtered_df = apply_sorting(filtered_df, sort_by, sort_dir)
     columns = [column for column in ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"] if column in df.columns]
 
     if not columns:
@@ -1197,7 +1321,10 @@ def add_row():
 
     df, _ = ensure_category_column(df)
 
-    new_row = {column: request.form.get(column, "") for column in df.columns}
+    new_row = {column: request.form.get(column, "") for column in default_columns}
+    if "id" in df.columns:
+        new_row["id"] = pd.NA
+
     df.loc[len(df)] = new_row
     df, _ = apply_category_rules(df)
     try:
@@ -1207,12 +1334,15 @@ def add_row():
 
     filter_values = get_filter_values_from_request(request.form)
     non_empty_filter_params = get_non_empty_filter_params(filter_values)
+    sort_by, sort_dir = get_sort_values_from_request(request.form)
 
     return redirect(
         url_for(
             "home",
             page=parse_positive_int(request.form.get("page"), 1),
             per_page=parse_positive_int(request.form.get("per_page"), 50),
+            sort_by=sort_by,
+            sort_dir=sort_dir,
             **non_empty_filter_params,
         )
     )
@@ -1229,7 +1359,8 @@ def edit_row(row_index: int):
     page = parse_positive_int(request.values.get("page"), 1)
     per_page = parse_positive_int(request.values.get("per_page"), 50)
     filter_values = get_filter_values_from_request(request.values)
-    editable_columns = [column for column in df.columns if column != "Categorie"]
+    sort_by, sort_dir = get_sort_values_from_request(request.values)
+    editable_columns = [column for column in df.columns if column not in ["id", "Categorie"]]
 
     if request.method == "POST":
         for column in editable_columns:
@@ -1243,7 +1374,16 @@ def edit_row(row_index: int):
             return render_file_locked_message("rij bewerken")
 
         non_empty_filter_params = get_non_empty_filter_params(filter_values)
-        return redirect(url_for("home", page=page, per_page=per_page, **non_empty_filter_params))
+        return redirect(
+            url_for(
+                "home",
+                page=page,
+                per_page=per_page,
+                sort_by=sort_by,
+                sort_dir=sort_dir,
+                **non_empty_filter_params,
+            )
+        )
 
     row_data = {
         column: to_display_value(df.iloc[row_index][column])
@@ -1310,6 +1450,8 @@ def edit_row(row_index: int):
             <form method="post" action="{{ url_for('edit_row', row_index=row_index) }}">
                 <input type="hidden" name="page" value="{{ page }}">
                 <input type="hidden" name="per_page" value="{{ per_page }}">
+                <input type="hidden" name="sort_by" value="{{ sort_by }}">
+                <input type="hidden" name="sort_dir" value="{{ sort_dir }}">
                 {% for key, value in filter_values.items() %}
                     <input type="hidden" name="{{ key }}" value="{{ value }}">
                 {% endfor %}
@@ -1325,7 +1467,7 @@ def edit_row(row_index: int):
                 </div>
                 <div class="actions">
                     <button type="submit">Opslaan</button>
-                    <a href="{{ url_for('home', page=page, per_page=per_page, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="back-link">Terug</a>
+                    <a href="{{ url_for('home', page=page, per_page=per_page, sort_by=sort_by, sort_dir=sort_dir, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="back-link">Terug</a>
                 </div>
             </form>
         </div>
@@ -1336,6 +1478,8 @@ def edit_row(row_index: int):
         row_index=row_index,
         page=page,
         per_page=per_page,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         filter_values=filter_values,
     )
 
@@ -1356,12 +1500,15 @@ def delete_row(row_index: int):
 
     filter_values = get_filter_values_from_request(request.form)
     non_empty_filter_params = get_non_empty_filter_params(filter_values)
+    sort_by, sort_dir = get_sort_values_from_request(request.form)
 
     return redirect(
         url_for(
             "home",
             page=parse_positive_int(request.form.get("page"), 1),
             per_page=parse_positive_int(request.form.get("per_page"), 50),
+            sort_by=sort_by,
+            sort_dir=sort_dir,
             **non_empty_filter_params,
         )
     )
