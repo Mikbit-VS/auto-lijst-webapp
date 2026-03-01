@@ -376,33 +376,49 @@ def home():
                 color: #6b7280;
                 font-size: 0.85rem;
                 margin-top: -8px;
-                margin-bottom: 14px;
+                margin-bottom: 0;
+            }
+            .top-layout {
+                display: flex;
+                align-items: stretch;
+                gap: 22px;
+                margin-bottom: 24px;
+            }
+            .brand-panel {
+                width: 280px;
+                flex: 0 0 280px;
+                display: flex;
             }
             .page-head {
                 display: flex;
-                align-items: flex-start;
-                gap: 14px;
+                flex-direction: column;
+                justify-content: space-between;
+                height: 100%;
+                width: 100%;
             }
             .brand-image {
-                width: 220px;
-                max-width: 30vw;
+                width: 100%;
+                max-width: 250px;
                 height: auto;
+                margin-top: 12px;
                 border-radius: 10px;
                 object-fit: cover;
                 border: 1px solid #e5e7eb;
             }
-            @media (max-width: 900px) {
-                .page-head {
+            @media (max-width: 1000px) {
+                .top-layout {
                     flex-direction: column;
                 }
-                .brand-image {
+                .brand-panel {
                     width: 100%;
-                    max-width: 360px;
+                    flex: 1 1 auto;
+                }
+                .brand-image {
+                    max-width: 380px;
                 }
             }
             h2 {
-                margin-top: 26px;
-                margin-bottom: 10px;
+                margin: 0;
                 font-size: 1.2rem;
             }
             .data-table {
@@ -414,12 +430,13 @@ def home():
             .data-table th,
             .data-table td {
                 border: 1px solid #d1d5db;
-                padding: 6px;
+                padding: 8px;
                 text-align: left;
                 vertical-align: top;
             }
             .data-table th {
                 background: #f3f4f6;
+                color: #111827;
             }
             .field {
                 margin-bottom: 10px;
@@ -429,9 +446,8 @@ def home():
                 background: #eff6ff;
                 border-radius: 10px;
                 padding: 16px;
-                margin-bottom: 10px;
-                max-width: 560px;
-                margin-left: auto;
+                margin-bottom: 0;
+                flex: 1 1 auto;
             }
             .add-title {
                 margin: 0 0 6px;
@@ -469,6 +485,10 @@ def home():
                 border-radius: 6px;
                 box-sizing: border-box;
             }
+            .per-page-form input.per-page-input {
+                width: 80px;
+                max-width: 80px;
+            }
             button {
                 background: #2563eb;
                 color: white;
@@ -488,6 +508,12 @@ def home():
             }
             .add-submit {
                 margin-top: 6px;
+                font-size: 0.9rem;
+            }
+            .per-page-submit {
+                padding: 8px 12px;
+                font-size: 0.9rem;
+                border: none;
             }
             .delete-btn {
                 background: #dc2626;
@@ -498,9 +524,39 @@ def home():
             .toolbar {
                 display: flex;
                 justify-content: space-between;
-                align-items: center;
+                align-items: flex-start;
                 gap: 12px;
-                margin: 8px 0 14px;
+                margin: 8px 0 6px;
+            }
+            .toolbar-left {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            .toolbar-right {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 4px;
+            }
+            .per-page-form {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-end;
+                gap: 4px;
+            }
+            .per-page-controls {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .per-page-form label {
+                margin-bottom: 0;
+            }
+            .per-page-input {
+                width: 80px;
+                max-width: 80px;
+                display: inline-block;
             }
             .meta {
                 color: #4b5563;
@@ -519,43 +575,53 @@ def home():
         </style>
 
         <div class="container">
-            <div class="page-head">
-                {% if header_image_url %}
-                    <img src="{{ header_image_url }}" alt="Auto" class="brand-image">
-                {% endif %}
-                <div>
-                    <h1>Autolijst</h1>
-                    <div class="version">Versie: {{ app_version }}</div>
+            <div class="top-layout">
+                <div class="brand-panel">
+                    <div class="page-head">
+                        <div>
+                            <h1>Autolijst</h1>
+                            <div class="version">Versie: {{ app_version }}</div>
+                        </div>
+                        {% if header_image_url %}
+                            <img src="{{ header_image_url }}" alt="Auto" class="brand-image">
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="add-section">
+                    <h3 class="add-title">Nieuwe auto invoeren</h3>
+                    <p class="add-help">Vul de velden in en klik op Toevoegen om direct een nieuwe rij op te slaan.</p>
+                    <form method="post" action="{{ url_for('add_row') }}">
+                        <input type="hidden" name="page" value="{{ page }}">
+                        <input type="hidden" name="per_page" value="{{ per_page }}">
+                        <div class="add-grid">
+                            {% for column in editable_columns %}
+                                <div class="field">
+                                    <label>{{ column }}</label>
+                                    <input type="text" name="{{ column }}">
+                                </div>
+                            {% endfor %}
+                        </div>
+                        <button type="submit" class="add-submit">Toevoegen</button>
+                    </form>
                 </div>
             </div>
 
-            <div class="add-section">
-                <h3 class="add-title">Nieuwe auto invoeren</h3>
-                <p class="add-help">Vul de velden in en klik op Toevoegen om direct een nieuwe rij op te slaan.</p>
-                <form method="post" action="{{ url_for('add_row') }}">
-                    <input type="hidden" name="page" value="{{ page }}">
-                    <input type="hidden" name="per_page" value="{{ per_page }}">
-                    <div class="add-grid">
-                        {% for column in editable_columns %}
-                            <div class="field">
-                                <label>{{ column }}</label>
-                                <input type="text" name="{{ column }}">
-                            </div>
-                        {% endfor %}
-                    </div>
-                    <button type="submit" class="add-submit">Toevoegen</button>
-                </form>
-            </div>
-
-            <h2>Overzicht</h2>
             <div class="toolbar">
-                <div class="meta">Totaal rijen: <strong>{{ total_rows }}</strong></div>
-                <form method="get" action="{{ url_for('home') }}">
-                    <label for="per_page">Rijen per pagina</label>
-                    <input id="per_page" type="text" name="per_page" value="{{ per_page }}" style="width:80px; max-width:none; display:inline-block; margin-left:8px;">
-                    <input type="hidden" name="page" value="1">
-                    <button type="submit" class="small-btn" style="border:none;">Toon</button>
-                </form>
+                <div class="toolbar-left">
+                    <h2>Overzicht</h2>
+                    <div class="meta">Totaal rijen: <strong>{{ total_rows }}</strong></div>
+                </div>
+                <div class="toolbar-right">
+                    <form method="get" action="{{ url_for('home') }}" class="per-page-form">
+                        <label for="per_page">Rijen per pagina</label>
+                        <div class="per-page-controls">
+                            <input id="per_page" type="text" name="per_page" value="{{ per_page }}" class="per-page-input">
+                            <input type="hidden" name="page" value="1">
+                            <button type="submit" class="per-page-submit">Toon</button>
+                        </div>
+                    </form>
+                </div>
             </div>
 
             <table class="data-table">
