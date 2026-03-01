@@ -1,10 +1,13 @@
 from pathlib import Path
+from io import BytesIO
+import importlib
 import os
 import re
 import sqlite3
 import subprocess
+from datetime import datetime
 
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, send_file, url_for
 import pandas as pd
 
 app = Flask(__name__)
@@ -13,6 +16,15 @@ db_path = Path(__file__).with_name("auto_lijst.db")
 static_path = Path(__file__).with_name("static")
 table_name = "autos"
 default_columns = ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"]
+filter_field_names = [
+    "filter_merk",
+    "filter_type",
+    "filter_bouwjaar_min",
+    "filter_bouwjaar_max",
+    "filter_prijs_min",
+    "filter_prijs_max",
+    "filter_categorie",
+]
 
 
 def get_app_version() -> str:
@@ -260,6 +272,102 @@ def parse_positive_int(value: str | None, default: int) -> int:
         return default
     return parsed if parsed > 0 else default
 
+
+def parse_optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def parse_price_number(value) -> float | None:
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    cleaned = (
+        text.replace("€", "")
+        .replace(" ", "")
+        .replace(".-", "")
+        .replace(",-", "")
+    )
+
+    if "," in cleaned and "." in cleaned:
+        cleaned = cleaned.replace(".", "")
+        cleaned = cleaned.replace(",", ".")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(",", ".")
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def get_filter_values_from_request(values) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for field in filter_field_names:
+        result[field] = str(values.get(field, "")).strip()
+    return result
+
+
+def get_non_empty_filter_params(filter_values: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in filter_values.items() if value != ""}
+
+
+def build_filtered_dataframe(df: pd.DataFrame, filter_values: dict[str, str]) -> pd.DataFrame:
+    filtered_df = df.copy()
+
+    filter_merk = filter_values["filter_merk"]
+    if filter_merk and "Merk" in filtered_df.columns:
+        filtered_df = filtered_df[
+            filtered_df["Merk"].astype(str).str.contains(filter_merk, case=False, na=False, regex=False)
+        ]
+
+    filter_type = filter_values["filter_type"]
+    if filter_type and "Type" in filtered_df.columns:
+        filtered_df = filtered_df[
+            filtered_df["Type"].astype(str).str.contains(filter_type, case=False, na=False, regex=False)
+        ]
+
+    bouwjaar_min = parse_optional_int(filter_values["filter_bouwjaar_min"])
+    bouwjaar_max = parse_optional_int(filter_values["filter_bouwjaar_max"])
+    if "Bouwjaar" in filtered_df.columns and (bouwjaar_min is not None or bouwjaar_max is not None):
+        year_series = filtered_df["Bouwjaar"].apply(parse_bouwjaar)
+        if bouwjaar_min is not None:
+            filtered_df = filtered_df[year_series.notna() & (year_series >= bouwjaar_min)]
+            year_series = filtered_df["Bouwjaar"].apply(parse_bouwjaar)
+        if bouwjaar_max is not None:
+            filtered_df = filtered_df[year_series.notna() & (year_series <= bouwjaar_max)]
+
+    prijs_min = parse_price_number(filter_values["filter_prijs_min"])
+    prijs_max = parse_price_number(filter_values["filter_prijs_max"])
+    if "Prijs" in filtered_df.columns and (prijs_min is not None or prijs_max is not None):
+        price_series = filtered_df["Prijs"].apply(parse_price_number)
+        if prijs_min is not None:
+            filtered_df = filtered_df[price_series.notna() & (price_series >= prijs_min)]
+            price_series = filtered_df["Prijs"].apply(parse_price_number)
+        if prijs_max is not None:
+            filtered_df = filtered_df[price_series.notna() & (price_series <= prijs_max)]
+
+    filter_categorie = filter_values["filter_categorie"]
+    if filter_categorie and "Categorie" in filtered_df.columns:
+        filtered_df = filtered_df[
+            filtered_df["Categorie"].astype(str).str.strip().str.lower() == filter_categorie.strip().lower()
+        ]
+
+    return filtered_df
+
 @app.route("/")
 def home():
     df = load_dataframe()
@@ -328,7 +436,11 @@ def home():
     df, _ = apply_category_rules(df)
     columns = list(df.columns)
     editable_columns = [column for column in columns if column != "Categorie"]
-    total_rows = len(df)
+
+    filter_values = get_filter_values_from_request(request.args)
+    filtered_df = build_filtered_dataframe(df, filter_values)
+
+    total_rows = len(filtered_df)
     page = parse_positive_int(request.args.get("page"), 1)
     per_page = parse_positive_int(request.args.get("per_page"), 50)
     per_page = min(per_page, 500)
@@ -343,13 +455,21 @@ def home():
     for row_index in range(start, end):
         row_data = {
             column: to_display_value(
-                df.iloc[row_index][column],
+                filtered_df.iloc[row_index][column],
                 column_name=column,
                 format_price=True,
             )
             for column in columns
         }
-        records.append({"index": row_index, "display_index": row_index + 1, "data": row_data})
+        original_index = int(filtered_df.index[row_index])
+        records.append({"index": original_index, "display_index": row_index + 1 + start, "data": row_data})
+
+    non_empty_filter_params = get_non_empty_filter_params(filter_values)
+    base_query_params = {"per_page": per_page, **non_empty_filter_params}
+    prev_page_url = url_for("home", page=page - 1, **base_query_params) if page > 1 else None
+    next_page_url = url_for("home", page=page + 1, **base_query_params) if page < total_pages else None
+    pdf_export_url = url_for("export_pdf", **non_empty_filter_params)
+    excel_export_url = url_for("export_excel", **non_empty_filter_params)
 
     return render_template_string(
         """
@@ -526,7 +646,7 @@ def home():
                 justify-content: space-between;
                 align-items: flex-start;
                 gap: 12px;
-                margin: 8px 0 6px;
+                margin: 2px 0 0;
             }
             .toolbar-left {
                 display: flex;
@@ -562,6 +682,78 @@ def home():
                 color: #4b5563;
                 font-size: 0.92rem;
             }
+            .filter-section {
+                border: 2px solid #bfdbfe;
+                background: #eff6ff;
+                border-radius: 10px;
+                padding: 16px;
+                margin-bottom: 24px;
+            }
+            .filter-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(170px, 1fr));
+                gap: 10px 12px;
+            }
+            .filter-actions {
+                margin-top: 8px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+            .filter-main-actions,
+            .filter-export-actions {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .filter-export-actions {
+                margin-left: auto;
+            }
+            .filter-actions button,
+            .filter-actions .small-btn {
+                height: 38px;
+                padding: 0 12px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 0.9rem;
+            }
+            .pdf-btn {
+                background: #d32f2f;
+            }
+            .pdf-btn:hover {
+                background: #b71c1c;
+            }
+            .excel-btn {
+                background: #217346;
+            }
+            .excel-btn:hover {
+                background: #185c37;
+            }
+            .reset-btn {
+                background: #4b5563;
+            }
+            input[type="number"],
+            select {
+                width: 100%;
+                max-width: 420px;
+                padding: 8px;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                box-sizing: border-box;
+            }
+            @media (max-width: 980px) {
+                .filter-grid {
+                    grid-template-columns: repeat(2, minmax(160px, 1fr));
+                }
+            }
+            @media (max-width: 620px) {
+                .filter-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
             .pager {
                 display: flex;
                 align-items: center;
@@ -594,6 +786,9 @@ def home():
                     <form method="post" action="{{ url_for('add_row') }}">
                         <input type="hidden" name="page" value="{{ page }}">
                         <input type="hidden" name="per_page" value="{{ per_page }}">
+                        {% for key, value in filter_values.items() %}
+                            <input type="hidden" name="{{ key }}" value="{{ value }}">
+                        {% endfor %}
                         <div class="add-grid">
                             {% for column in editable_columns %}
                                 <div class="field">
@@ -607,6 +802,58 @@ def home():
                 </div>
             </div>
 
+            <div class="filter-section">
+                <h3 class="add-title">Filter</h3>
+                <form method="get" action="{{ url_for('home') }}">
+                    <input type="hidden" name="page" value="1">
+                    <input type="hidden" name="per_page" value="{{ per_page }}">
+                    <div class="filter-grid">
+                        <div class="field">
+                            <label for="filter_merk">Merk bevat</label>
+                            <input id="filter_merk" type="text" name="filter_merk" value="{{ filter_values['filter_merk'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_type">Type bevat</label>
+                            <input id="filter_type" type="text" name="filter_type" value="{{ filter_values['filter_type'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_bouwjaar_min">Bouwjaar van</label>
+                            <input id="filter_bouwjaar_min" type="number" name="filter_bouwjaar_min" value="{{ filter_values['filter_bouwjaar_min'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_bouwjaar_max">Bouwjaar t/m</label>
+                            <input id="filter_bouwjaar_max" type="number" name="filter_bouwjaar_max" value="{{ filter_values['filter_bouwjaar_max'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_prijs_min">Prijs van</label>
+                            <input id="filter_prijs_min" type="text" name="filter_prijs_min" value="{{ filter_values['filter_prijs_min'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_prijs_max">Prijs t/m</label>
+                            <input id="filter_prijs_max" type="text" name="filter_prijs_max" value="{{ filter_values['filter_prijs_max'] }}">
+                        </div>
+                        <div class="field">
+                            <label for="filter_categorie">Categorie</label>
+                            <select id="filter_categorie" name="filter_categorie">
+                                <option value="" {% if not filter_values['filter_categorie'] %}selected{% endif %}>Alle</option>
+                                <option value="Klassieker" {% if filter_values['filter_categorie'] == 'Klassieker' %}selected{% endif %}>Klassieker</option>
+                                <option value="Youngtimer" {% if filter_values['filter_categorie'] == 'Youngtimer' %}selected{% endif %}>Youngtimer</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="filter-actions">
+                        <div class="filter-main-actions">
+                            <button type="submit">Filter</button>
+                            <a href="{{ url_for('home', per_page=per_page) }}" class="small-btn reset-btn">Reset</a>
+                        </div>
+                        <div class="filter-export-actions">
+                            <a href="{{ pdf_export_url }}" class="small-btn pdf-btn">PDF van selectie</a>
+                            <a href="{{ excel_export_url }}" class="small-btn excel-btn">Excel van selectie</a>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
             <div class="toolbar">
                 <div class="toolbar-left">
                     <h2>Overzicht</h2>
@@ -618,6 +865,9 @@ def home():
                         <div class="per-page-controls">
                             <input id="per_page" type="text" name="per_page" value="{{ per_page }}" class="per-page-input">
                             <input type="hidden" name="page" value="1">
+                            {% for key, value in filter_values.items() %}
+                                <input type="hidden" name="{{ key }}" value="{{ value }}">
+                            {% endfor %}
                             <button type="submit" class="per-page-submit">Toon</button>
                         </div>
                     </form>
@@ -643,10 +893,13 @@ def home():
                                     <td>{{ record.data[column] }}</td>
                                 {% endfor %}
                                 <td>
-                                    <a href="{{ url_for('edit_row', row_index=record.index, page=page, per_page=per_page) }}" class="small-btn">Bewerk</a>
+                                    <a href="{{ url_for('edit_row', row_index=record.index, page=page, per_page=per_page, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="small-btn">Bewerk</a>
                                     <form method="post" action="{{ url_for('delete_row', row_index=record.index) }}" class="inline-form">
                                         <input type="hidden" name="page" value="{{ page }}">
                                         <input type="hidden" name="per_page" value="{{ per_page }}">
+                                        {% for key, value in filter_values.items() %}
+                                            <input type="hidden" name="{{ key }}" value="{{ value }}">
+                                        {% endfor %}
                                         <button type="submit" class="small-btn delete-btn">Verwijder</button>
                                     </form>
                                 </td>
@@ -661,12 +914,12 @@ def home():
             </table>
 
             <div class="pager">
-                {% if page > 1 %}
-                    <a href="{{ url_for('home', page=page-1, per_page=per_page) }}">← Vorige</a>
+                {% if prev_page_url %}
+                    <a href="{{ prev_page_url }}">← Vorige</a>
                 {% endif %}
                 <span>Pagina {{ page }} van {{ total_pages }}</span>
-                {% if page < total_pages %}
-                    <a href="{{ url_for('home', page=page+1, per_page=per_page) }}">Volgende →</a>
+                {% if next_page_url %}
+                    <a href="{{ next_page_url }}">Volgende →</a>
                 {% endif %}
             </div>
         </div>
@@ -680,12 +933,260 @@ def home():
         total_pages=total_pages,
         app_version=app_version,
         header_image_url=header_image_url,
+        filter_values=filter_values,
+        prev_page_url=prev_page_url,
+        next_page_url=next_page_url,
+        pdf_export_url=pdf_export_url,
+        excel_export_url=excel_export_url,
     )
 
 
 @app.route("/version")
 def version():
     return jsonify({"version": get_app_version()})
+
+
+@app.route("/export/pdf")
+def export_pdf():
+    df = load_dataframe()
+    df, _ = ensure_category_column(df)
+    df, _ = apply_category_rules(df)
+
+    filter_values = get_filter_values_from_request(request.args)
+    filtered_df = build_filtered_dataframe(df, filter_values)
+    columns = list(df.columns)
+
+    try:
+        pagesizes = importlib.import_module("reportlab.lib.pagesizes")
+        pdf_canvas = importlib.import_module("reportlab.pdfgen.canvas")
+        pdf_colors = importlib.import_module("reportlab.lib.colors")
+        a4_size = pagesizes.A4
+        canvas_class = pdf_canvas.Canvas
+    except Exception:
+        return "PDF-export vereist reportlab. Installeer dependencies met pip install -r requirements.txt.", 500
+
+    buffer = BytesIO()
+    pdf = canvas_class(buffer, pagesize=a4_size)
+
+    page_width, page_height = a4_size
+    left_margin = 30
+    right_margin = 30
+    top_margin = 32
+    bottom_margin = 28
+    usable_width = page_width - left_margin - right_margin
+
+    header_bg = pdf_colors.Color(0.90, 0.95, 1)
+    table_header_bg = pdf_colors.Color(0.16, 0.39, 0.92)
+    table_header_text = pdf_colors.white
+    row_alt_bg = pdf_colors.Color(0.97, 0.98, 1)
+    border_color = pdf_colors.Color(0.82, 0.84, 0.88)
+    normal_text = pdf_colors.Color(0.12, 0.16, 0.22)
+
+    table_columns = [column for column in columns if column in ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"]]
+    column_weights = {
+        "Merk": 0.19,
+        "Type": 0.28,
+        "Bouwjaar": 0.15,
+        "Prijs": 0.17,
+        "Categorie": 0.21,
+    }
+    widths = [usable_width * column_weights[column] for column in table_columns]
+
+    def truncate_for_width(text: str, width: float) -> str:
+        max_chars = max(6, int(width / 5.2))
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
+
+    def draw_table_header(y_pos: float) -> float:
+        pdf.setStrokeColor(border_color)
+        x_pos = left_margin
+        header_height = 20
+        for index, column in enumerate(table_columns):
+            cell_width = widths[index]
+            pdf.setFillColor(table_header_bg)
+            pdf.rect(x_pos, y_pos - header_height, cell_width, header_height, stroke=1, fill=1)
+            pdf.setFillColor(table_header_text)
+            pdf.setFont("Helvetica-Bold", 9)
+            pdf.drawString(x_pos + 5, y_pos - 13, column)
+            x_pos += cell_width
+        return y_pos - header_height
+
+    now_text = datetime.now().strftime("%d-%m-%Y %H:%M")
+    active_filters = [f"{key.replace('filter_', '')}: {value}" for key, value in filter_values.items() if value]
+    filter_text = " | ".join(active_filters) if active_filters else "Geen"
+
+    title_box_height = 76
+    y = page_height - top_margin
+
+    pdf.setStrokeColor(border_color)
+    pdf.setFillColor(header_bg)
+    pdf.roundRect(left_margin, y - title_box_height, usable_width, title_box_height, 8, stroke=1, fill=1)
+
+    pdf.setFillColor(normal_text)
+    pdf.setFont("Helvetica-Bold", 14)
+    pdf.drawString(left_margin + 12, y - 24, "Autolijst - Gefilterde selectie")
+    pdf.setFont("Helvetica", 9)
+    pdf.drawString(left_margin + 12, y - 40, f"Exportmoment: {now_text}")
+    pdf.drawString(left_margin + 12, y - 54, f"Aantal rijen: {len(filtered_df)}")
+    pdf.drawString(left_margin + 12, y - 68, truncate_for_width(f"Filters: {filter_text}", usable_width - 24))
+
+    y -= title_box_height + 16
+    y = draw_table_header(y)
+
+    if filtered_df.empty:
+        row_height = 18
+        pdf.setFillColor(pdf_colors.white)
+        pdf.rect(left_margin, y - row_height, usable_width, row_height, stroke=1, fill=1)
+        pdf.setFillColor(normal_text)
+        pdf.setFont("Helvetica", 9)
+        pdf.drawString(left_margin + 6, y - 12, "Geen rijen gevonden voor de gekozen filters.")
+    else:
+        row_height = 17
+        row_counter = 0
+        for row_index in filtered_df.index:
+            if y - row_height < bottom_margin:
+                pdf.showPage()
+                y = page_height - top_margin
+                y = draw_table_header(y)
+
+            row_counter += 1
+            x_pos = left_margin
+            for col_index, column in enumerate(table_columns):
+                cell_width = widths[col_index]
+
+                if row_counter % 2 == 0:
+                    pdf.setFillColor(row_alt_bg)
+                else:
+                    pdf.setFillColor(pdf_colors.white)
+
+                pdf.setStrokeColor(border_color)
+                pdf.rect(x_pos, y - row_height, cell_width, row_height, stroke=1, fill=1)
+
+                cell_value = to_display_value(
+                    filtered_df.at[row_index, column],
+                    column_name=column,
+                    format_price=True,
+                )
+                text_value = truncate_for_width(str(cell_value), cell_width - 10)
+
+                pdf.setFillColor(normal_text)
+                pdf.setFont("Helvetica", 8.5)
+                pdf.drawString(x_pos + 5, y - 12, text_value)
+                x_pos += cell_width
+
+            y -= row_height
+
+    pdf.save()
+    buffer.seek(0)
+
+    file_name = f"autolijst_selectie_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=file_name)
+
+
+@app.route("/export/excel")
+def export_excel():
+    df = load_dataframe()
+    df, _ = ensure_category_column(df)
+    df, _ = apply_category_rules(df)
+
+    filter_values = get_filter_values_from_request(request.args)
+    filtered_df = build_filtered_dataframe(df, filter_values)
+    columns = [column for column in ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"] if column in df.columns]
+
+    if not columns:
+        columns = list(df.columns)
+
+    export_rows = []
+    for row_index in filtered_df.index:
+        export_rows.append(
+            {
+                column: to_display_value(
+                    filtered_df.at[row_index, column],
+                    column_name=column,
+                    format_price=True,
+                )
+                for column in columns
+            }
+        )
+
+    export_df = pd.DataFrame(export_rows, columns=columns)
+    if export_df.empty:
+        empty_row = {column: "" for column in columns}
+        if columns:
+            empty_row[columns[0]] = "Geen rijen gevonden voor de gekozen filters."
+        export_df = pd.DataFrame([empty_row], columns=columns)
+
+    active_filters = [f"{key.replace('filter_', '')}: {value}" for key, value in filter_values.items() if value]
+    filter_text = " | ".join(active_filters) if active_filters else "Geen"
+
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Selectie", startrow=5)
+
+        worksheet = writer.sheets["Selectie"]
+        workbook = writer.book
+
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+
+        title_fill = PatternFill("solid", fgColor="E6F0FF")
+        title_font = Font(bold=True, size=14)
+        meta_font = Font(size=10)
+
+        worksheet["A1"] = "Autolijst - Gefilterde selectie"
+        worksheet["A2"] = f"Exportmoment: {datetime.now().strftime('%d-%m-%Y %H:%M')}"
+        worksheet["A3"] = f"Aantal rijen: {len(filtered_df)}"
+        worksheet["A4"] = f"Filters: {filter_text}"
+
+        for row_number in [1, 2, 3, 4]:
+            cell = worksheet[f"A{row_number}"]
+            cell.fill = title_fill
+            cell.font = title_font if row_number == 1 else meta_font
+
+        max_header_col = max(1, len(columns))
+        worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_header_col)
+        worksheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max_header_col)
+        worksheet.merge_cells(start_row=3, start_column=1, end_row=3, end_column=max_header_col)
+        worksheet.merge_cells(start_row=4, start_column=1, end_row=4, end_column=max_header_col)
+
+        header_row = 6
+        last_row = header_row + len(export_df)
+
+        from openpyxl.utils import get_column_letter
+
+        column_widths = {
+            "Merk": 20,
+            "Type": 30,
+            "Bouwjaar": 14,
+            "Prijs": 16,
+            "Categorie": 18,
+        }
+
+        for index, column in enumerate(columns, start=1):
+            column_letter = get_column_letter(index)
+            worksheet.column_dimensions[column_letter].width = column_widths.get(column, 18)
+
+        table_ref = f"A{header_row}:{get_column_letter(len(columns))}{last_row}"
+        table = Table(displayName="AutolijstSelectie", ref=table_ref)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium2",
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=True,
+            showColumnStripes=False,
+        )
+        worksheet.add_table(table)
+        worksheet.freeze_panes = "A7"
+
+    buffer.seek(0)
+    file_name = f"autolijst_selectie_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return send_file(
+        buffer,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=file_name,
+    )
 
 
 @app.route("/add", methods=["POST"])
@@ -703,11 +1204,16 @@ def add_row():
         save_dataframe(df)
     except PermissionError:
         return render_file_locked_message("rij toevoegen")
+
+    filter_values = get_filter_values_from_request(request.form)
+    non_empty_filter_params = get_non_empty_filter_params(filter_values)
+
     return redirect(
         url_for(
             "home",
             page=parse_positive_int(request.form.get("page"), 1),
             per_page=parse_positive_int(request.form.get("per_page"), 50),
+            **non_empty_filter_params,
         )
     )
 
@@ -722,6 +1228,7 @@ def edit_row(row_index: int):
 
     page = parse_positive_int(request.values.get("page"), 1)
     per_page = parse_positive_int(request.values.get("per_page"), 50)
+    filter_values = get_filter_values_from_request(request.values)
     editable_columns = [column for column in df.columns if column != "Categorie"]
 
     if request.method == "POST":
@@ -734,7 +1241,9 @@ def edit_row(row_index: int):
             save_dataframe(df)
         except PermissionError:
             return render_file_locked_message("rij bewerken")
-        return redirect(url_for("home", page=page, per_page=per_page))
+
+        non_empty_filter_params = get_non_empty_filter_params(filter_values)
+        return redirect(url_for("home", page=page, per_page=per_page, **non_empty_filter_params))
 
     row_data = {
         column: to_display_value(df.iloc[row_index][column])
@@ -801,6 +1310,9 @@ def edit_row(row_index: int):
             <form method="post" action="{{ url_for('edit_row', row_index=row_index) }}">
                 <input type="hidden" name="page" value="{{ page }}">
                 <input type="hidden" name="per_page" value="{{ per_page }}">
+                {% for key, value in filter_values.items() %}
+                    <input type="hidden" name="{{ key }}" value="{{ value }}">
+                {% endfor %}
                 {% for column in editable_columns %}
                     <div class="field">
                         <label>{{ column }}</label>
@@ -813,7 +1325,7 @@ def edit_row(row_index: int):
                 </div>
                 <div class="actions">
                     <button type="submit">Opslaan</button>
-                    <a href="{{ url_for('home', page=page, per_page=per_page) }}" class="back-link">Terug</a>
+                    <a href="{{ url_for('home', page=page, per_page=per_page, filter_merk=filter_values['filter_merk'], filter_type=filter_values['filter_type'], filter_bouwjaar_min=filter_values['filter_bouwjaar_min'], filter_bouwjaar_max=filter_values['filter_bouwjaar_max'], filter_prijs_min=filter_values['filter_prijs_min'], filter_prijs_max=filter_values['filter_prijs_max'], filter_categorie=filter_values['filter_categorie']) }}" class="back-link">Terug</a>
                 </div>
             </form>
         </div>
@@ -824,6 +1336,7 @@ def edit_row(row_index: int):
         row_index=row_index,
         page=page,
         per_page=per_page,
+        filter_values=filter_values,
     )
 
 
@@ -840,11 +1353,16 @@ def delete_row(row_index: int):
         save_dataframe(df)
     except PermissionError:
         return render_file_locked_message("rij verwijderen")
+
+    filter_values = get_filter_values_from_request(request.form)
+    non_empty_filter_params = get_non_empty_filter_params(filter_values)
+
     return redirect(
         url_for(
             "home",
             page=parse_positive_int(request.form.get("page"), 1),
             per_page=parse_positive_int(request.form.get("per_page"), 50),
+            **non_empty_filter_params,
         )
     )
 
