@@ -1,12 +1,16 @@
 from pathlib import Path
 import os
 import re
+import sqlite3
 
 from flask import Flask, redirect, render_template_string, request, url_for
 import pandas as pd
 
 app = Flask(__name__)
 excel_path = Path(__file__).with_name("auto_lijst.xlsx")
+db_path = Path(__file__).with_name("auto_lijst.db")
+table_name = "autos"
+default_columns = ["Merk", "Type", "Bouwjaar", "Prijs", "Categorie"]
 
 
 def ensure_category_column(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
@@ -107,10 +111,9 @@ def render_file_locked_message(action_label: str):
             <div class="container">
                 <h1>Opslaan lukt niet</h1>
                 <div class="warn">
-                    De wijziging ({{ action_label }}) kon niet worden opgeslagen omdat
-                    <strong>auto_lijst.xlsx</strong> in gebruik is.
+                    De wijziging ({{ action_label }}) kon niet worden opgeslagen.
                 </div>
-                <p>Sluit het Excel-bestand en probeer opnieuw.</p>
+                <p>Probeer het opnieuw. Als het probleem blijft, herstart de app.</p>
                 <a href="{{ url_for('home') }}">← Terug naar overzicht</a>
             </div>
             """,
@@ -120,25 +123,67 @@ def render_file_locked_message(action_label: str):
     )
 
 
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    cursor = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    )
+    return cursor.fetchone() is not None
+
+
 def load_dataframe() -> pd.DataFrame:
-    if not excel_path.exists():
-        return pd.DataFrame()
-    return pd.read_excel(excel_path)
+    if not db_path.exists() and excel_path.exists():
+        try:
+            migrated = pd.read_excel(excel_path)
+            migrated, _ = ensure_category_column(migrated)
+            migrated, _ = apply_category_rules(migrated)
+            save_dataframe(migrated)
+        except Exception:
+            pass
 
+    if not db_path.exists():
+        return pd.DataFrame(columns=default_columns)
 
-def is_excel_file_locked() -> bool:
-    if not excel_path.exists():
-        return False
+    with sqlite3.connect(db_path) as connection:
+        if not table_exists(connection, table_name):
+            return pd.DataFrame(columns=default_columns)
 
-    try:
-        with open(excel_path, "a+b"):
-            return False
-    except PermissionError:
-        return True
+        query = f'SELECT "Merk", "Type", "Bouwjaar", "Prijs", "Categorie" FROM "{table_name}" ORDER BY id'
+        df = pd.read_sql_query(query, connection)
+
+    return df
 
 
 def save_dataframe(df: pd.DataFrame) -> None:
-    df.to_excel(excel_path, index=False)
+    df, _ = ensure_category_column(df)
+    df, _ = apply_category_rules(df)
+
+    for column in default_columns:
+        if column not in df.columns:
+            df[column] = ""
+
+    df = df[default_columns].copy()
+    df = df.fillna("")
+    for column in default_columns:
+        df[column] = df[column].astype(str)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            f'''
+            CREATE TABLE IF NOT EXISTS "{table_name}" (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                "Merk" TEXT,
+                "Type" TEXT,
+                "Bouwjaar" TEXT,
+                "Prijs" TEXT,
+                "Categorie" TEXT
+            )
+            '''
+        )
+        connection.execute(f'DELETE FROM "{table_name}"')
+        insert_sql = f'INSERT INTO "{table_name}" ("Merk", "Type", "Bouwjaar", "Prijs", "Categorie") VALUES (?, ?, ?, ?, ?)'
+        connection.executemany(insert_sql, df[default_columns].itertuples(index=False, name=None))
+        connection.commit()
 
 
 def format_eur_value(value) -> str:
@@ -226,8 +271,6 @@ def home():
 
     df, _ = ensure_category_column(df)
     df, _ = apply_category_rules(df)
-    file_locked = is_excel_file_locked()
-
     columns = list(df.columns)
     editable_columns = [column for column in columns if column != "Categorie"]
     total_rows = len(df)
@@ -320,15 +363,6 @@ def home():
                 grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
                 gap: 10px 14px;
             }
-            .lock-banner {
-                background: #fff7ed;
-                border: 1px solid #fdba74;
-                color: #7c2d12;
-                border-radius: 8px;
-                padding: 10px 12px;
-                margin: 12px 0 18px;
-                font-size: 0.92rem;
-            }
             label {
                 display: block;
                 font-size: 0.92rem;
@@ -393,12 +427,6 @@ def home():
 
         <div class="container">
             <h1>Excel Autolijst</h1>
-
-            {% if file_locked %}
-                <div class="lock-banner">
-                    Let op: <strong>auto_lijst.xlsx</strong> staat open in Excel. Bekijken werkt, maar opslaan van wijzigingen kan mislukken.
-                </div>
-            {% endif %}
 
             <h2>Nieuwe rij toevoegen</h2>
             <div class="add-section">
@@ -484,7 +512,6 @@ def home():
         page=page,
         per_page=per_page,
         total_pages=total_pages,
-        file_locked=file_locked,
     )
 
 

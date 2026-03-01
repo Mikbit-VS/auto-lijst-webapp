@@ -1,6 +1,9 @@
 # Excel Autolijst
 
-Kleine Flask-app die `auto_lijst.xlsx` uitleest, toont én laat aanpassen via de browser.
+Kleine Flask-app om auto’s te beheren via de browser.
+
+- Opslag: `auto_lijst.db` (SQLite)
+- Eenmalige migratie: als `auto_lijst.db` nog niet bestaat en `auto_lijst.xlsx` wel, dan wordt data automatisch overgezet.
 
 ## Vereisten
 
@@ -45,7 +48,7 @@ Gebruik voor productie een WSGI-server in plaats van Flask debug server.
 ### Lokaal productie-achtig starten
 
 ```powershell
-waitress-serve --host=0.0.0.0 --port=8000 app:app
+python -m waitress --host=0.0.0.0 --port=8000 app:app
 ```
 
 Daarna openen:
@@ -54,7 +57,7 @@ Daarna openen:
 
 ### Deployen (bijv. Render of Railway)
 
-Dit project bevat nu een `Procfile`:
+Dit project bevat een `Procfile`:
 
 - `web: waitress-serve --host=0.0.0.0 --port=$PORT app:app`
 
@@ -67,20 +70,23 @@ Algemene stappen:
 
 Belangrijk:
 
-- Zorg dat `auto_lijst.xlsx` aanwezig is in de runtime omgeving.
-- Op sommige cloudplatformen is lokale schijfopslag tijdelijk; gebruik dan een externe opslag (bijv. database of object storage) als je data permanent moet blijven.
+- De app gebruikt `auto_lijst.db` als lokale database.
+- Op sommige cloudplatformen is lokale schijfopslag tijdelijk; gebruik dan een externe database als data permanent moet blijven.
 
-## Wijzigingen doorvoeren via `app.py`
+## Functionaliteit
 
-Via de webpagina kun je nu:
+Via de webpagina kun je:
 
 - een nieuwe rij toevoegen;
 - bestaande rijen bewerken via de knop **Bewerk**;
 - rijen verwijderen.
 
-De hoofdpagina gebruikt paginering (instelbaar via **Rijen per pagina**) zodat ook grote bestanden, zoals 10.000+ rijen, werkbaar blijven.
+Daarnaast:
 
-Alle wijzigingen worden direct opgeslagen in `auto_lijst.xlsx`.
+- paginering op de overzichtspagina;
+- automatische `Categorie` op basis van `Bouwjaar`:
+  - `< 1990` → `Klassieker`
+  - `>= 1990` → `Youngtimer`
 
 ## Veelvoorkomende fouten
 
@@ -88,6 +94,6 @@ Alle wijzigingen worden direct opgeslagen in `auto_lijst.xlsx`.
   - Controleer of je venv actief is.
   - Voer opnieuw uit: `pip install -r requirements.txt`
 
-- Fout op Excel-bestand:
+- Migratie vanaf Excel lukt niet:
   - Controleer of `auto_lijst.xlsx` in dezelfde map staat als `app.py`.
-  - Controleer of het bestand minimaal één kolom bevat.
+  - Controleer of het bestand leesbaar is.

@@ -7,6 +7,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Local database
+auto_lijst.db
+
 # Tooling caches
 .pytest_cache/
 .mypy_cache/
